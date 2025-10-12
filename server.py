@@ -1,13 +1,14 @@
-# server.py
 import socket
 import threading
 import logging
 from datetime import datetime
+import os
 
-class ChatServer:
-    def __init__(self, host='0.0.0.0', port=5555):
-        self.host = host
-        self.port = port
+class RailwayChatServer:
+    def __init__(self):
+        # Railway предоставляет порт через переменную окружения
+        self.host = '0.0.0.0'
+        self.port = int(os.environ.get('PORT', 5555))
         self.clients = []
         self.nicknames = []
         self.setup_logging()
@@ -17,8 +18,7 @@ class ChatServer:
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('server.log'),
-                logging.StreamHandler()
+                logging.StreamHandler()  # В Railway логи выводятся в консоль
             ]
         )
         self.logger = logging.getLogger(__name__)
@@ -31,12 +31,14 @@ class ChatServer:
         try:
             self.server.bind((self.host, self.port))
             self.server.listen()
-            self.logger.info(f"Сервер запущен на {self.host}:{self.port}")
-            self.logger.info("Ожидание подключений...")
+            self.logger.info("=" * 50)
+            self.logger.info(f"🚀 Сервер запущен на {self.host}:{self.port}")
+            self.logger.info("📢 Ожидание подключений...")
+            self.logger.info("=" * 50)
             
             while True:
                 client, address = self.server.accept()
-                self.logger.info(f"Новое подключение от {address[0]}:{address[1]}")
+                self.logger.info(f"🔗 Новое подключение от {address[0]}:{address[1]}")
                 
                 # Запрос ника от клиента
                 client.send("NICK".encode('utf-8'))
@@ -45,9 +47,9 @@ class ChatServer:
                 self.nicknames.append(nickname)
                 self.clients.append(client)
                 
-                self.logger.info(f"Никнейм клиента: {nickname}")
+                self.logger.info(f"👤 Никнейм клиента: {nickname}")
                 self.broadcast(f"{nickname} присоединился к чату!".encode('utf-8'))
-                client.send("Подключение к серверу успешно!".encode('utf-8'))
+                client.send("✅ Подключение к серверу успешно!".encode('utf-8'))
                 
                 # Запуск потока для обработки сообщений от клиента
                 thread = threading.Thread(target=self.handle_client, args=(client,))
@@ -55,7 +57,7 @@ class ChatServer:
                 thread.start()
                 
         except Exception as e:
-            self.logger.error(f"Ошибка сервера: {e}")
+            self.logger.error(f"❌ Ошибка сервера: {e}")
         finally:
             self.stop_server()
             
@@ -78,7 +80,7 @@ class ChatServer:
                 self.remove_client(client)
                 break
             except Exception as e:
-                self.logger.error(f"Ошибка обработки сообщения: {e}")
+                self.logger.error(f"❌ Ошибка обработки сообщения: {e}")
                 self.remove_client(client)
                 break
                 
@@ -106,31 +108,18 @@ class ChatServer:
             self.nicknames.remove(nickname)
             
             client.close()
-            self.broadcast(f"{nickname} покинул чат.".encode('utf-8'))
-            self.logger.info(f"Клиент {nickname} отключен")
+            self.broadcast(f"❌ {nickname} покинул чат.".encode('utf-8'))
+            self.logger.info(f"👋 Клиент {nickname} отключен")
             
     def stop_server(self):
         """Остановка сервера"""
-        self.logger.info("Остановка сервера...")
+        self.logger.info("🛑 Остановка сервера...")
         for client in self.clients:
             client.close()
         if hasattr(self, 'server'):
             self.server.close()
-        self.logger.info("Сервер остановлен")
+        self.logger.info("✅ Сервер остановлен")
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Chat Server')
-    parser.add_argument('--host', default='192.168.0.83', help='Host address')
-    parser.add_argument('--port', type=int, default=5555, help='Port number')
-    
-    args = parser.parse_args()
-    
-    server = ChatServer(args.host, args.port)
-    
-    try:
-        server.start_server()
-    except KeyboardInterrupt:
-        server.logger.info("Сервер остановлен пользователем")
-        server.stop_server()
+    server = RailwayChatServer()
+    server.start_server()
