@@ -1,125 +1,84 @@
-import socket
-import threading
+import asyncio
+import websockets
+import json
 import logging
 from datetime import datetime
 import os
 
-class RailwayChatServer:
+class WebSocketChatServer:
     def __init__(self):
-        # Railway предоставляет порт через переменную окружения
-        self.host = '0.0.0.0'
-        self.port = int(os.environ.get('PORT', 5555))
-        self.clients = []
-        self.nicknames = []
+        self.port = int(os.environ.get('PORT', 8000))
+        self.clients = set()
         self.setup_logging()
         
     def setup_logging(self):
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.StreamHandler()  # В Railway логи выводятся в консоль
-            ]
+            handlers=[logging.StreamHandler()]
         )
         self.logger = logging.getLogger(__name__)
         
-    def start_server(self):
-        """Запуск сервера"""
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    async def handle_client(self, websocket, path):
+        """Обработка нового клиента"""
+        self.clients.add(websocket)
+        self.logger.info(f"🔗 Новый клиент подключился. Всего клиентов: {len(self.clients)}")
         
         try:
-            self.server.bind((self.host, self.port))
-            self.server.listen()
-            self.logger.info("=" * 50)
-            self.logger.info(f"🚀 Сервер запущен на {self.host}:{self.port}")
-            self.logger.info("📢 Ожидание подключений...")
-            self.logger.info("=" * 50)
+            # Получаем никнейм
+            await websocket.send(json.dumps({"type": "request_nickname"}))
+            nickname_message = await websocket.recv()
+            nickname_data = json.loads(nickname_message)
+            nickname = nickname_data.get("nickname", "Anonymous")
             
-            while True:
-                client, address = self.server.accept()
-                self.logger.info(f"🔗 Новое подключение от {address[0]}:{address[1]}")
-                
-                # Запрос ника от клиента
-                client.send("NICK".encode('utf-8'))
-                nickname = client.recv(1024).decode('utf-8')
-                
-                self.nicknames.append(nickname)
-                self.clients.append(client)
-                
-                self.logger.info(f"👤 Никнейм клиента: {nickname}")
-                self.broadcast(f"{nickname} присоединился к чату!".encode('utf-8'))
-                client.send("✅ Подключение к серверу успешно!".encode('utf-8'))
-                
-                # Запуск потока для обработки сообщений от клиента
-                thread = threading.Thread(target=self.handle_client, args=(client,))
-                thread.daemon = True
-                thread.start()
-                
-        except Exception as e:
-            self.logger.error(f"❌ Ошибка сервера: {e}")
-        finally:
-            self.stop_server()
+            # Уведомляем всех о новом пользователе
+            join_message = {
+                "type": "user_joined",
+                "nickname": nickname,
+                "timestamp": datetime.now().isoformat(),
+                "message": f"{nickname} присоединился к чату!"
+            }
+            await self.broadcast(join_message)
             
-    def handle_client(self, client):
-        """Обработка сообщений от клиента"""
-        while True:
-            try:
-                message = client.recv(1024)
-                if not message:
-                    break
+            # Основной цикл обработки сообщений
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    if data.get("type") == "message":
+                        chat_message = {
+                            "type": "chat_message",
+                            "nickname": nickname,
+                            "message": data["message"],
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        self.logger.info(f"💬 {nickname}: {data['message']}")
+                        await self.broadcast(chat_message)
+                except json.JSONDecodeError:
+                    continue
                     
-                # Логирование сообщения
-                nickname = self.nicknames[self.clients.index(client)]
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.logger.info(f"[{timestamp}] {nickname}: {message.decode('utf-8')}")
-                
-                self.broadcast(message, nickname)
-                
-            except (ConnectionResetError, BrokenPipeError):
-                self.remove_client(client)
-                break
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка обработки сообщения: {e}")
-                self.remove_client(client)
-                break
-                
-    def broadcast(self, message, sender_nickname=None):
+        except websockets.exceptions.ConnectionClosed:
+            self.logger.info("🔌 Соединение закрыто")
+        finally:
+            self.clients.remove(websocket)
+            self.logger.info(f"👋 Клиент отключен. Осталось клиентов: {len(self.clients)}")
+            
+    async def broadcast(self, message):
         """Отправка сообщения всем клиентам"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        if self.clients:
+            message_json = json.dumps(message)
+            await asyncio.gather(
+                *[client.send(message_json) for client in self.clients],
+                return_exceptions=True
+            )
+            
+    async def start_server(self):
+        """Запуск WebSocket сервера"""
+        self.logger.info(f"🚀 WebSocket сервер запущен на порту {self.port}")
+        self.logger.info("📢 Ожидание WebSocket подключений...")
         
-        if sender_nickname:
-            formatted_message = f"[{timestamp}] {sender_nickname}: {message.decode('utf-8')}"
-            message = formatted_message.encode('utf-8')
-        
-        for client in self.clients[:]:
-            try:
-                client.send(message)
-            except:
-                self.remove_client(client)
-                
-    def remove_client(self, client):
-        """Удаление клиента при отключении"""
-        if client in self.clients:
-            index = self.clients.index(client)
-            nickname = self.nicknames[index]
-            
-            self.clients.remove(client)
-            self.nicknames.remove(nickname)
-            
-            client.close()
-            self.broadcast(f"❌ {nickname} покинул чат.".encode('utf-8'))
-            self.logger.info(f"👋 Клиент {nickname} отключен")
-            
-    def stop_server(self):
-        """Остановка сервера"""
-        self.logger.info("🛑 Остановка сервера...")
-        for client in self.clients:
-            client.close()
-        if hasattr(self, 'server'):
-            self.server.close()
-        self.logger.info("✅ Сервер остановлен")
+        async with websockets.serve(self.handle_client, "0.0.0.0", self.port):
+            await asyncio.Future()  # Бесконечный цикл
 
 if __name__ == "__main__":
-    server = RailwayChatServer()
-    server.start_server()
+    server = WebSocketChatServer()
+    asyncio.run(server.start_server())

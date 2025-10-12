@@ -1,29 +1,27 @@
-import socket
-import threading
+import asyncio
+import websockets
+import json
 import sys
 
-class RailwayChatClient:
+class WebSocketChatClient:
     def __init__(self):
-        self.client = None
+        self.websocket = None
         self.nickname = ""
         self.running = False
         
-    def connect_to_server(self, domain, port=5555):
-        """Подключение к серверу на Railway"""
+    async def connect_to_server(self, uri):
+        """Подключение к WebSocket серверу"""
         try:
-            print(f"🔄 Подключение к {domain}:{port}...")
-            self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.client.connect((domain, port))
+            print(f"🔄 Подключение к {uri}...")
+            self.websocket = await websockets.connect(uri)
             
-            # Получение запроса ника от сервера
-            nickname_request = self.client.recv(1024).decode('utf-8')
-            if nickname_request == "NICK":
+            # Получаем запрос ника
+            message = await self.websocket.recv()
+            data = json.loads(message)
+            
+            if data.get("type") == "request_nickname":
                 self.nickname = input("👤 Введите ваш никнейм: ")
-                self.client.send(self.nickname.encode('utf-8'))
-                
-            # Получение подтверждения подключения
-            response = self.client.recv(1024).decode('utf-8')
-            print(f"\n{response}")
+                await self.websocket.send(json.dumps({"nickname": self.nickname}))
             
             self.running = True
             return True
@@ -32,75 +30,79 @@ class RailwayChatClient:
             print(f"❌ Ошибка подключения: {e}")
             return False
             
-    def receive_messages(self):
+    async def receive_messages(self):
         """Получение сообщений от сервера"""
-        while self.running:
-            try:
-                message = self.client.recv(1024).decode('utf-8')
-                if message:
-                    print(f"\r{message}\nВы: ", end="")
-                else:
-                    break
-            except:
-                print("\n❌ Соединение с сервером потеряно")
-                self.running = False
-                break
+        try:
+            async for message in self.websocket:
+                data = json.loads(message)
                 
-    def send_messages(self):
+                if data["type"] == "chat_message":
+                    timestamp = data["timestamp"][11:19]  # Берем только время
+                    print(f"\r[{timestamp}] {data['nickname']}: {data['message']}")
+                elif data["type"] == "user_joined":
+                    print(f"\r🌟 {data['message']}")
+                    
+                print("Вы: ", end="", flush=True)
+                
+        except websockets.exceptions.ConnectionClosed:
+            print("\n🔌 Соединение с сервером потеряно")
+            self.running = False
+            
+    async def send_messages(self):
         """Отправка сообщений на сервер"""
-        while self.running:
-            try:
-                message = input("Вы: ")
-                if message.lower() == '/quit':
-                    self.running = False
-                    break
-                elif message.lower() == '/users':
-                    # Можно добавить команду для просмотра пользователей
-                    pass
-                elif message.strip():
-                    self.client.send(message.encode('utf-8'))
-            except KeyboardInterrupt:
-                print("\n🛑 Выход из чата...")
-                self.running = False
-                break
-            except Exception as e:
-                print(f"❌ Ошибка отправки сообщения: {e}")
-                self.running = False
-                break
+        try:
+            while self.running:
+                message = await asyncio.get_event_loop().run_in_executor(
+                    None, input, "Вы: "
+                )
                 
-    def start(self, domain, port=5555):
+                if message.lower() == '/quit':
+                    break
+                elif message.strip():
+                    await self.websocket.send(json.dumps({
+                        "type": "message",
+                        "message": message
+                    }))
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+            
+    async def start(self, uri):
         """Запуск клиента"""
-        if not self.connect_to_server(domain, port):
+        if not await self.connect_to_server(uri):
             return
             
         print("\n✅ Подключение успешно! Для выхода введите /quit")
         print("-" * 50)
         
-        # Поток для получения сообщений
-        receive_thread = threading.Thread(target=self.receive_messages)
-        receive_thread.daemon = True
-        receive_thread.start()
+        # Запускаем задачи параллельно
+        receive_task = asyncio.create_task(self.receive_messages())
+        send_task = asyncio.create_task(self.send_messages())
         
-        # Основной поток для отправки сообщений
-        self.send_messages()
+        # Ждем завершения одной из задач
+        await asyncio.gather(receive_task, send_task, return_exceptions=True)
         
-        self.client.close()
+        await self.websocket.close()
         print("👋 Клиент завершил работу")
 
 def main():
-    print("=== 🚀 Чат-клиент для Railway ===")
+    print("=== 🚀 WebSocket Чат-клиент ===")
     
-    # Если переданы аргументы командной строки
-    if len(sys.argv) >= 2:
+    if len(sys.argv) > 1:
         domain = sys.argv[1]
-        port = int(sys.argv[2]) if len(sys.argv) > 2 else 5555
     else:
-        domain = input("Введите домен Railway (например: your-project.up.railway.app): ").strip()
-        port = input("Введите порт (по умолчанию 5555): ").strip()
-        port = int(port) if port else 5555
+        domain = input("Введите домен Railway (без http://): ").strip()
     
-    client = RailwayChatClient()
-    client.start(domain, port)
+    # Формируем WebSocket URI
+    if domain.startswith('http://'):
+        domain = domain[7:]
+    if domain.startswith('https://'):
+        domain = domain[8:]
+    
+    # Для Railway используем wss://
+    uri = f"wss://{domain}"
+    
+    client = WebSocketChatClient()
+    asyncio.run(client.start(uri))
 
 if __name__ == "__main__":
     main()
