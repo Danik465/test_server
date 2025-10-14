@@ -5,7 +5,6 @@ import logging
 from datetime import datetime
 import os
 import socket
-import ssl
 
 class WebSocketChatServer:
     def __init__(self):
@@ -22,7 +21,7 @@ class WebSocketChatServer:
         )
         self.logger = logging.getLogger(__name__)
 
-    async def handle_client(self, websocket, path):
+    async def handle_client(self, websocket):
         """Обработка нового клиента"""
         client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
         self.clients.add(websocket)
@@ -138,7 +137,7 @@ class WebSocketChatServer:
 
         self.logger.info("📢 Ожидание WebSocket подключений...")
 
-        # На Railway SSL обрабатывается на уровне прокси, поэтому запускаем без SSL
+        # Исправленная строка - убрали path из обработчика
         start_server = websockets.serve(
             self.handle_client, 
             self.host, 
