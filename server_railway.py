@@ -8,7 +8,7 @@ import socket
 
 class WebSocketChatServer:
     def __init__(self):
-        self.port = int(os.environ.get('PORT', 8000))
+        self.port = int(os.environ.get('PORT', 8080))
         self.host = "0.0.0.0"
         self.clients = set()
         self.setup_logging()
