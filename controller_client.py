@@ -25,9 +25,16 @@ class RemoteControllerClient:
         self.last_mouse_time = 0
         self.mouse_throttle = 0.033
         
-        # Новое разрешение
+        # Разрешение экрана
         self.screen_width = 1920
         self.screen_height = 1080
+        
+        # Для корректного отображения
+        self.current_image = None
+        self.image_x_offset = 0
+        self.image_y_offset = 0
+        self.image_display_width = 0
+        self.image_display_height = 0
         
         self.setup_logging()
         
@@ -57,7 +64,7 @@ class RemoteControllerClient:
         self.status_label.pack(side=tk.LEFT, padx=10)
         
         # Информация о разрешении
-        resolution_label = tk.Label(status_frame, text="Разрешение: 1920x1080", fg="blue", font=("Arial", 10))
+        resolution_label = tk.Label(status_frame, text="Разрешение: 1920x1080 (масштабирование)", fg="blue", font=("Arial", 10))
         resolution_label.pack(side=tk.RIGHT, padx=10)
         
         # Информация
@@ -72,7 +79,7 @@ class RemoteControllerClient:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         self.info_text.insert(tk.END, "Подключитесь к серверу для начала управления\n")
-        self.info_text.insert(tk.END, "Разрешение экрана: 1920x1080\n")
+        self.info_text.insert(tk.END, "Режим: Полное масштабирование с черными полосами\n")
         
         # Кнопки управления
         button_frame = tk.Frame(self.control_window)
@@ -96,31 +103,17 @@ class RemoteControllerClient:
         tk.Button(button_frame, text="🔴 Выход", command=self.quit_app,
                  width=10, height=2, bg="red", fg="white").pack(side=tk.LEFT, padx=5)
         
-        # Окно для отображения экрана - теперь 1920x1080
+        # Окно для отображения экрана
         self.screen_window = tk.Toplevel(self.control_window)
-        self.screen_window.title("Экран удаленного компьютера - 1920x1080")
+        self.screen_window.title("Экран удаленного компьютера - Масштабирование 1920x1080")
         self.screen_window.geometry("1920x1080")
         
-        # Добавляем скроллинг для больших экранов
+        # Используем Canvas для правильного отображения
         screen_frame = tk.Frame(self.screen_window)
-        screen_frame.pack(fill=tk.BOTH, expand=True)
+        screen_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Создаем Canvas для скроллинга
-        self.screen_canvas = tk.Canvas(screen_frame, bg="black", 
-                                      scrollregion=(0, 0, self.screen_width, self.screen_height))
-        
-        # Добавляем скроллбары
-        v_scrollbar = tk.Scrollbar(screen_frame, orient=tk.VERTICAL, command=self.screen_canvas.yview)
-        h_scrollbar = tk.Scrollbar(screen_frame, orient=tk.HORIZONTAL, command=self.screen_canvas.xview)
-        self.screen_canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
-        
-        # Размещаем элементы
-        self.screen_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # Создаем изображение на Canvas
-        self.screen_image_id = self.screen_canvas.create_image(0, 0, anchor=tk.NW)
+        self.screen_canvas = tk.Canvas(screen_frame, bg="black", width=1920, height=1080)
+        self.screen_canvas.pack(fill=tk.BOTH, expand=True)
         
         self.screen_window.protocol("WM_DELETE_WINDOW", lambda: self.screen_window.withdraw())
         self.screen_window.withdraw()
@@ -129,7 +122,7 @@ class RemoteControllerClient:
         self.process_messages()
 
     def bind_control_events(self):
-        """Привязка событий мыши и клавиатуры для нового разрешения"""
+        """Привязка событий мыши и клавиатуры"""
         if not self.screen_window:
             return
             
@@ -147,21 +140,32 @@ class RemoteControllerClient:
         
         self.screen_canvas.focus_set()
 
+    def get_image_coordinates(self, x, y):
+        """Преобразование координат мыши с учетом масштабирования и черных полос"""
+        # Если изображение еще не загружено, возвращаем исходные координаты
+        if self.image_display_width == 0 or self.image_display_height == 0:
+            return x, y
+            
+        # Проверяем, находится ли курсор в области изображения (не в черных полосах)
+        if (x < self.image_x_offset or x >= self.image_x_offset + self.image_display_width or
+            y < self.image_y_offset or y >= self.image_y_offset + self.image_display_height):
+            return None, None  # Курсор в черных полосах
+            
+        # Возвращаем координаты относительно изображения
+        return x, y
+
     def on_mouse_move(self, event):
-        """Обработка движения мыши с учетом нового разрешения"""
+        """Обработка движения мыши"""
         current_time = time.time()
         if (self.mouse_control_enabled and self.connected and 
             (current_time - self.last_mouse_time) >= self.mouse_throttle):
             
             self.last_mouse_time = current_time
             
-            # Получаем координаты с учетом скроллинга
-            x = self.screen_canvas.canvasx(event.x)
-            y = self.screen_canvas.canvasy(event.y)
-            
-            # Ограничиваем координаты размерами изображения
-            x = max(0, min(x, self.screen_width - 1))
-            y = max(0, min(y, self.screen_height - 1))
+            # Получаем координаты с учетом масштабирования
+            x, y = self.get_image_coordinates(event.x, event.y)
+            if x is None or y is None:
+                return  # Курсор в черных полосах
             
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_move", {"x": x, "y": y}), 
@@ -171,11 +175,10 @@ class RemoteControllerClient:
     def on_mouse_down(self, event):
         """Левый клик мыши - нажатие"""
         if self.mouse_control_enabled and self.connected:
-            x = self.screen_canvas.canvasx(event.x)
-            y = self.screen_canvas.canvasy(event.y)
-            x = max(0, min(x, self.screen_width - 1))
-            y = max(0, min(y, self.screen_height - 1))
-            
+            x, y = self.get_image_coordinates(event.x, event.y)
+            if x is None or y is None:
+                return
+                
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_down", {"x": x, "y": y, "button": "left"}), 
                 self.asyncio_loop
@@ -184,11 +187,10 @@ class RemoteControllerClient:
     def on_mouse_up(self, event):
         """Левый клик мыши - отпускание"""
         if self.mouse_control_enabled and self.connected:
-            x = self.screen_canvas.canvasx(event.x)
-            y = self.screen_canvas.canvasy(event.y)
-            x = max(0, min(x, self.screen_width - 1))
-            y = max(0, min(y, self.screen_height - 1))
-            
+            x, y = self.get_image_coordinates(event.x, event.y)
+            if x is None or y is None:
+                return
+                
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_up", {"x": x, "y": y, "button": "left"}), 
                 self.asyncio_loop
@@ -197,11 +199,10 @@ class RemoteControllerClient:
     def on_right_mouse_down(self, event):
         """Правый клик мыши - нажатие"""
         if self.mouse_control_enabled and self.connected:
-            x = self.screen_canvas.canvasx(event.x)
-            y = self.screen_canvas.canvasy(event.y)
-            x = max(0, min(x, self.screen_width - 1))
-            y = max(0, min(y, self.screen_height - 1))
-            
+            x, y = self.get_image_coordinates(event.x, event.y)
+            if x is None or y is None:
+                return
+                
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_down", {"x": x, "y": y, "button": "right"}), 
                 self.asyncio_loop
@@ -210,11 +211,10 @@ class RemoteControllerClient:
     def on_right_mouse_up(self, event):
         """Правый клик мыши - отпускание"""
         if self.mouse_control_enabled and self.connected:
-            x = self.screen_canvas.canvasx(event.x)
-            y = self.screen_canvas.canvasy(event.y)
-            x = max(0, min(x, self.screen_width - 1))
-            y = max(0, min(y, self.screen_height - 1))
-            
+            x, y = self.get_image_coordinates(event.x, event.y)
+            if x is None or y is None:
+                return
+                
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_up", {"x": x, "y": y, "button": "right"}), 
                 self.asyncio_loop
@@ -223,11 +223,10 @@ class RemoteControllerClient:
     def on_double_click(self, event):
         """Двойной клик"""
         if self.mouse_control_enabled and self.connected:
-            x = self.screen_canvas.canvasx(event.x)
-            y = self.screen_canvas.canvasy(event.y)
-            x = max(0, min(x, self.screen_width - 1))
-            y = max(0, min(y, self.screen_height - 1))
-            
+            x, y = self.get_image_coordinates(event.x, event.y)
+            if x is None or y is None:
+                return
+                
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_click", {"x": x, "y": y, "button": "left"}), 
                 self.asyncio_loop
@@ -277,12 +276,11 @@ class RemoteControllerClient:
         msg_type = message.get("type")
         
         if msg_type == "screen_update":
-            self.log_info("📸 Получены данные экрана 1920x1080")
+            self.log_info("📸 Получены данные экрана с масштабированием")
             self.display_screen(message["screen_data"])
             
         elif msg_type == "controlled_connected":
-            client_id = message.get("client_id", "unknown")
-            self.log_info(f"🖥️ Управляемый клиент подключен: {client_id}")
+            self.log_info("🖥️ Управляемый клиент подключен")
             
         elif msg_type == "controlled_disconnected":
             self.log_info("🔌 Управляемый клиент отключен")
@@ -299,13 +297,13 @@ class RemoteControllerClient:
             self.log_info(f"❌ Ошибка: {message.get('message', '')}")
 
     def display_screen(self, screen_data):
-        """Отображение скриншота 1920x1080 на Canvas"""
+        """Отображение скриншота с черными полосами"""
         try:
             if not screen_data:
                 self.logger.error("❌ Пустые данные экрана")
                 return
                 
-            self.logger.info(f"🖼️ Декодирование изображения 1920x1080, размер данных: {len(screen_data)}")
+            self.logger.info(f"🖼️ Декодирование изображения, размер данных: {len(screen_data)}")
             
             # Декодируем base64
             image_data = base64.b64decode(screen_data)
@@ -316,30 +314,29 @@ class RemoteControllerClient:
             # Открываем изображение
             image = Image.open(image_buffer)
             
-            # Проверяем размер
-            if image.size != (self.screen_width, self.screen_height):
-                self.logger.warning(f"⚠️ Размер изображения {image.size} не соответствует ожидаемому {self.screen_width}x{self.screen_height}")
-                image = image.resize((self.screen_width, self.screen_height), Image.Resampling.LANCZOS)
-            
-            # Конвертируем в формат, совместимый с Tkinter
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
             # Создаем PhotoImage
             photo = ImageTk.PhotoImage(image)
             
-            # Обновляем изображение на Canvas
-            self.screen_canvas.itemconfig(self.screen_image_id, image=photo)
-            self.screen_canvas.image = photo  # Сохраняем ссылку
+            # Сохраняем ссылку на изображение
+            self.current_image = photo
             
-            # Обновляем область скроллинга
-            self.screen_canvas.config(scrollregion=(0, 0, self.screen_width, self.screen_height))
+            # Очищаем canvas и отображаем изображение
+            self.screen_canvas.delete("all")
+            self.screen_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+            
+            # Получаем реальные размеры изображения (могут быть меньше 1920x1080 из-за масштабирования)
+            self.image_display_width = image.width
+            self.image_display_height = image.height
+            
+            # Вычисляем смещения для черных полос
+            self.image_x_offset = (self.screen_width - self.image_display_width) // 2
+            self.image_y_offset = (self.screen_height - self.image_display_height) // 2
             
             # Показываем окно, если оно скрыто
             if not self.screen_window.winfo_viewable():
                 self.screen_window.deiconify()
                     
-            self.logger.info(f"✅ Изображение 1920x1080 успешно отображено")
+            self.logger.info(f"✅ Изображение отображено с размерами {self.image_display_width}x{self.image_display_height}")
                 
         except Exception as e:
             self.logger.error(f"❌ Ошибка отображения экрана: {e}")
@@ -373,7 +370,7 @@ class RemoteControllerClient:
                 self.send_command("capture_screen"), 
                 self.asyncio_loop
             )
-            self.log_info("📨 Запрос скриншота 1920x1080 отправлен")
+            self.log_info("📨 Запрос скриншота отправлен")
 
     def stop_screen(self):
         """Остановка передачи экрана"""
@@ -384,7 +381,7 @@ class RemoteControllerClient:
             )
             self.log_info("⏹️ Остановка передачи экрана")
             # Очищаем изображение
-            self.screen_canvas.itemconfig(self.screen_image_id, image='')
+            self.screen_canvas.delete("all")
             self.screen_window.withdraw()
 
     def toggle_mouse_control(self):
@@ -399,7 +396,7 @@ class RemoteControllerClient:
         """Включение управления мышью"""
         self.mouse_control_enabled = True
         self.mouse_btn.config(text="🐭 Выключить управление", bg="red", fg="white")
-        self.log_info("🎮 Управление мышью АКТИВИРОВАНО (1920x1080)")
+        self.log_info("🎮 Управление мышью АКТИВИРОВАНО")
         if not self.screen_window.winfo_viewable():
             self.screen_window.deiconify()
         self.screen_canvas.focus_set()
@@ -441,13 +438,12 @@ class RemoteControllerClient:
                 ping_interval=30,
                 ping_timeout=10,
                 close_timeout=5,
-                max_size=15 * 1024 * 1024  # Увеличиваем лимит для Full HD
+                max_size=10 * 1024 * 1024
             )
             
             await self.websocket.send(json.dumps({
                 "type": "controller",
-                "client_id": self.client_id,
-                "resolution": "1920x1080"
+                "client_id": self.client_id
             }))
             
             message = await self.websocket.recv()
@@ -536,7 +532,7 @@ class RemoteControllerClient:
 
 def main():
     print("=== 🎮 Клиент удаленного управления ===")
-    print("🖥️  Разрешение: 1920x1080")
+    print("🖥️  Режим: Полное масштабирование с черными полосами")
     
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("Main")
