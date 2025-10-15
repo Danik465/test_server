@@ -10,8 +10,8 @@ class WebSocketRemoteServer:
     def __init__(self):
         self.port = int(os.environ.get('PORT', 8080))
         self.host = "0.0.0.0"
-        self.controller_client = None  # Управляющий клиент
-        self.controlled_client = None  # Управляемый клиент
+        self.controller_client = None
+        self.controlled_client = None
         self.setup_logging()
 
     def setup_logging(self):
@@ -31,7 +31,7 @@ class WebSocketRemoteServer:
         client_id = None
         
         try:
-            # Получаем тип клиента
+            # Получаем тип клиента с таймаутом
             init_message = await asyncio.wait_for(websocket.recv(), timeout=30.0)
             init_data = json.loads(init_message)
             client_type = init_data.get("type")
@@ -67,7 +67,7 @@ class WebSocketRemoteServer:
                     "role": "controlled"
                 }))
 
-                # Уведомляем управляющего о подключении управляемого
+                # Уведомляем управляющего
                 if self.controller_client:
                     await self.controller_client.send(json.dumps({
                         "type": "controlled_connected",
@@ -88,10 +88,14 @@ class WebSocketRemoteServer:
                     data = json.loads(message)
                     await self.route_message(data, websocket, client_type)
                     
+                except websockets.exceptions.ConnectionClosed:
+                    break
                 except json.JSONDecodeError as e:
-                    self.logger.error(f"❌ Ошибка декодирования JSON: {e}")
+                    self.logger.error(f"❌ Ошибка декодирования JSON от {client_type}: {e}")
+                    continue
                 except Exception as e:
-                    self.logger.error(f"❌ Ошибка обработки сообщения: {e}")
+                    self.logger.error(f"❌ Ошибка обработки сообщения от {client_type}: {e}")
+                    continue
 
         except asyncio.TimeoutError:
             self.logger.warning(f"⏰ Таймаут инициализации клиента {client_ip}")
@@ -108,7 +112,6 @@ class WebSocketRemoteServer:
                 self.controlled_client = None
                 self.logger.info("🖥️ Управляемый клиент отключен")
                 
-                # Уведомляем управляющего об отключении
                 if self.controller_client:
                     await self.controller_client.send(json.dumps({
                         "type": "controlled_disconnected"
@@ -119,14 +122,12 @@ class WebSocketRemoteServer:
         message_type = data.get("type")
         
         if sender_type == "controller" and message_type == "control_command":
-            # Команда от управляющего - отправляем управляемому
             if self.controlled_client:
                 await self.controlled_client.send(json.dumps({
                     "type": "execute_command",
                     "command": data.get("command"),
                     "data": data.get("data")
                 }))
-                self.logger.info(f"📨 Команда отправлена управляемому: {data.get('command')}")
             else:
                 await websocket.send(json.dumps({
                     "type": "error",
@@ -134,18 +135,14 @@ class WebSocketRemoteServer:
                 }))
                 
         elif sender_type == "controlled" and message_type == "screen_data":
-            # Данные экрана от управляемого - отправляем управляющему
             if self.controller_client:
                 await self.controller_client.send(json.dumps({
                     "type": "screen_update",
                     "screen_data": data.get("screen_data"),
                     "timestamp": datetime.now().isoformat()
                 }))
-            else:
-                self.logger.warning("📊 Получены данные экрана, но управляющий не подключен")
                 
         elif sender_type == "controlled" and message_type == "status_update":
-            # Статус от управляемого - отправляем управляющему
             if self.controller_client:
                 await self.controller_client.send(json.dumps({
                     "type": "controlled_status",
@@ -162,13 +159,15 @@ class WebSocketRemoteServer:
             self.handle_client, 
             self.host, 
             self.port,
-            ping_interval=20,
-            ping_timeout=10
+            ping_interval=30,
+            ping_timeout=10,
+            close_timeout=5,
+            max_size=10 * 1024 * 1024  # 10MB
         )
         
         async with start_server:
             self.logger.info("✅ Сервер удаленного доступа успешно запущен")
-            await asyncio.Future()  # вечный цикл
+            await asyncio.Future()
 
 if __name__ == "__main__":
     server = WebSocketRemoteServer()
