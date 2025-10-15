@@ -18,8 +18,8 @@ class RemoteControlledClient:
         self.screen_capturing = False
         self.mouse_control = False
         self.screen_task = None
-        self.target_width = 1920  # Целевое разрешение
-        self.target_height = 1080 # Целевое разрешение
+        self.target_width = 1920
+        self.target_height = 1080
         self.setup_logging()
         
     def setup_logging(self):
@@ -34,7 +34,7 @@ class RemoteControlledClient:
         self.logger = logging.getLogger("RemoteControlled")
 
     def capture_screen(self):
-        """Захват всего экрана с масштабированием до 1920x1080 с сохранением пропорций"""
+        """Захват всего экрана и масштабирование с сохранением всех элементов"""
         try:
             # Захватываем скриншот всего экрана
             screenshot = ImageGrab.grab()
@@ -42,18 +42,19 @@ class RemoteControlledClient:
             
             self.logger.debug(f"🖥️ Исходное разрешение: {original_width}x{original_height}")
             
+            # Масштабируем изображение так, чтобы ВЕСЬ экран поместился в 1920x1080
             # Вычисляем коэффициенты масштабирования
             width_ratio = self.target_width / original_width
             height_ratio = self.target_height / original_height
             
-            # Используем меньший коэффициент, чтобы изображение полностью поместилось
+            # Используем МЕНЬШИЙ коэффициент, чтобы ВЕСЬ экран поместился
             scale_ratio = min(width_ratio, height_ratio)
             
-            # Вычисляем новые размеры с сохранением пропорций
+            # Вычисляем новые размеры
             new_width = int(original_width * scale_ratio)
             new_height = int(original_height * scale_ratio)
             
-            # Масштабируем изображение
+            # Масштабируем изображение с высоким качеством
             resized_screenshot = screenshot.resize((new_width, new_height), Image.Resampling.LANCZOS)
             
             # Создаем черный фон целевого размера
@@ -71,8 +72,19 @@ class RemoteControlledClient:
             final_image.save(buffer, format='JPEG', quality=85, optimize=True)
             image_data = buffer.getvalue()
             
-            self.logger.debug(f"📸 Изображение масштабировано: {original_width}x{original_height} -> {new_width}x{new_height} на {self.target_width}x{self.target_height}")
-            return base64.b64encode(image_data).decode('utf-8')
+            self.logger.debug(f"📸 Весь экран масштабирован: {original_width}x{original_height} -> {new_width}x{new_height}")
+            
+            # Возвращаем также параметры масштабирования для корректной работы мыши
+            return {
+                'image_data': base64.b64encode(image_data).decode('utf-8'),
+                'original_width': original_width,
+                'original_height': original_height,
+                'scaled_width': new_width,
+                'scaled_height': new_height,
+                'offset_x': x_offset,
+                'offset_y': y_offset,
+                'scale_ratio': scale_ratio
+            }
             
         except Exception as e:
             self.logger.error(f"❌ Ошибка захвата экрана: {e}")
@@ -82,7 +94,7 @@ class RemoteControlledClient:
 
     async def send_screen_updates(self):
         """Отправка обновлений экрана"""
-        self.logger.info("🔄 Начало передачи экрана с полным масштабированием")
+        self.logger.info("🔄 Начало передачи ВСЕГО экрана")
         
         frame_count = 0
         start_time = time.time()
@@ -91,25 +103,30 @@ class RemoteControlledClient:
             try:
                 frame_start = time.time()
                 
-                screen_data = self.capture_screen()
-                if screen_data and self.websocket:
+                capture_result = self.capture_screen()
+                if capture_result and self.websocket:
                     await self.websocket.send(json.dumps({
                         "type": "screen_data",
-                        "screen_data": screen_data,
-                        "timestamp": frame_start,
-                        "resolution": f"{self.target_width}x{self.target_height}"
+                        "screen_data": capture_result['image_data'],
+                        "original_width": capture_result['original_width'],
+                        "original_height": capture_result['original_height'],
+                        "scaled_width": capture_result['scaled_width'],
+                        "scaled_height": capture_result['scaled_height'],
+                        "offset_x": capture_result['offset_x'],
+                        "offset_y": capture_result['offset_y'],
+                        "scale_ratio": capture_result['scale_ratio'],
+                        "timestamp": frame_start
                     }))
                     frame_count += 1
                     
-                    # Логируем статистику каждые 30 кадров
                     if frame_count % 30 == 0:
                         elapsed = time.time() - start_time
                         fps = frame_count / elapsed
                         self.logger.info(f"📊 Статистика: {frame_count} кадров, {fps:.1f} FPS")
                 
-                # Регулируем FPS в зависимости от нагрузки
+                # Регулируем FPS
                 elapsed_frame = time.time() - frame_start
-                target_fps = 8  # 8 FPS для баланса качества/производительности
+                target_fps = 10
                 sleep_time = max(1.0/target_fps - elapsed_frame, 0.01)
                 await asyncio.sleep(sleep_time)
                     
@@ -132,7 +149,7 @@ class RemoteControlledClient:
                 if not self.screen_capturing:
                     self.screen_capturing = True
                     self.screen_task = asyncio.create_task(self.send_screen_updates())
-                    await self.send_status(f"Захват экрана активирован (масштабирование до {self.target_width}x{self.target_height})")
+                    await self.send_status("Захват ВСЕГО экрана активирован")
                     
             elif command == "stop_capture":
                 if self.screen_capturing:
@@ -151,7 +168,6 @@ class RemoteControlledClient:
                 await self.send_status(f"Управление мышью {status}")
                 
             elif command == "mouse_move" and self.mouse_control:
-                # Корректируем координаты с учетом масштабирования и черных полос
                 await self.handle_mouse_command("move", data)
                 
             elif command == "mouse_click" and self.mouse_control:
@@ -190,41 +206,30 @@ class RemoteControlledClient:
             await self.send_status(f"Ошибка выполнения: {e}")
 
     async def handle_mouse_command(self, action, data):
-        """Обработка команд мыши с корректным масштабированием координат"""
+        """Обработка команд мыши с корректным преобразованием координат"""
         try:
-            # Получаем текущее разрешение экрана
-            screen_width, screen_height = pyautogui.size()
-            
-            # Захватываем текущий скриншот для вычисления масштаба
-            current_screenshot = ImageGrab.grab()
-            original_width, original_height = current_screenshot.size
-            
-            # Вычисляем масштаб и смещения
-            width_ratio = self.target_width / original_width
-            height_ratio = self.target_height / original_height
-            scale_ratio = min(width_ratio, height_ratio)
-            
-            new_width = int(original_width * scale_ratio)
-            new_height = int(original_height * scale_ratio)
-            
-            x_offset = (self.target_width - new_width) // 2
-            y_offset = (self.target_height - new_height) // 2
+            # Получаем параметры масштабирования из данных
+            scale_ratio = data.get('scale_ratio', 1.0)
+            offset_x = data.get('offset_x', 0)
+            offset_y = data.get('offset_y', 0)
+            scaled_width = data.get('scaled_width', self.target_width)
+            scaled_height = data.get('scaled_height', self.target_height)
             
             # Получаем координаты от управляющего клиента
             remote_x = data['x']
             remote_y = data['y']
             
-            # Преобразуем координаты обратно в системные
-            # Сначала убираем смещение черных полос
-            if remote_x < x_offset or remote_x >= x_offset + new_width or remote_y < y_offset or remote_y >= y_offset + new_height:
-                # Клик вне области изображения (в черных полосах) - игнорируем
-                return
-                
-            # Преобразуем координаты из масштабированного изображения в реальные
-            local_x = int((remote_x - x_offset) / scale_ratio)
-            local_y = int((remote_y - y_offset) / scale_ratio)
+            # Проверяем, находится ли клик в области изображения (не в черных полосах)
+            if (remote_x < offset_x or remote_x >= offset_x + scaled_width or 
+                remote_y < offset_y or remote_y >= offset_y + scaled_height):
+                return  # Клик в черных полосах - игнорируем
             
-            # Ограничиваем координаты размерами экрана
+            # Преобразуем координаты из масштабированного изображения в реальные
+            local_x = int((remote_x - offset_x) / scale_ratio)
+            local_y = int((remote_y - offset_y) / scale_ratio)
+            
+            # Получаем реальное разрешение экрана для проверки границ
+            screen_width, screen_height = pyautogui.size()
             local_x = max(0, min(local_x, screen_width - 1))
             local_y = max(0, min(local_y, screen_height - 1))
             
@@ -269,21 +274,19 @@ class RemoteControlledClient:
                     max_size=10 * 1024 * 1024
                 )
                 
-                # Отправляем идентификатор
                 await self.websocket.send(json.dumps({
                     "type": "controlled",
                     "client_id": self.client_id,
                     "resolution": f"{self.target_width}x{self.target_height}"
                 }))
                 
-                # Ждем подтверждения
                 message = await asyncio.wait_for(self.websocket.recv(), timeout=10.0)
                 data = json.loads(message)
                 
                 if data.get("type") == "connection_established":
                     self.connected = True
                     self.logger.info("✅ Подключение к серверу установлено")
-                    await self.send_status(f"Управляемый клиент готов к работе (масштабирование до {self.target_width}x{self.target_height})")
+                    await self.send_status("Управляемый клиент готов к работе (режим: ВЕСЬ экран)")
                     return True
                     
             except Exception as e:
@@ -319,8 +322,8 @@ class RemoteControlledClient:
             return
             
         print(f"\n✅ Управляемый клиент {self.client_id} запущен")
-        print(f"🖥️  Режим: Полное масштабирование до {self.target_width}x{self.target_height}")
-        print("💡 Ожидание команд от управляющего клиента...")
+        print("🖥️  Режим: Отображение ВСЕГО экрана")
+        print("💡 Все элементы интерфейса будут видны")
         print("⚠️  ВНИМАНИЕ: После активации управления ваш компьютер будет управляться удаленно!")
         print("-" * 50)
         
@@ -329,7 +332,6 @@ class RemoteControlledClient:
         except Exception as e:
             self.logger.error(f"❌ Ошибка в основном цикле: {e}")
         finally:
-            # Очистка ресурсов
             self.connected = False
             self.screen_capturing = False
             self.mouse_control = False
