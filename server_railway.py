@@ -4,11 +4,10 @@ import json
 import logging
 from datetime import datetime
 import os
-import socket
 
 class WebSocketRemoteServer:
     def __init__(self):
-        self.port = int(os.environ.get('PORT', 8080))
+        self.port = int(os.environ.get('PORT', 8000))
         self.host = "0.0.0.0"
         self.controller_client = None
         self.controlled_client = None
@@ -31,7 +30,7 @@ class WebSocketRemoteServer:
         client_id = None
         
         try:
-            # Получаем тип клиента с таймаутом
+            # Получаем тип клиента
             init_message = await asyncio.wait_for(websocket.recv(), timeout=30.0)
             init_data = json.loads(init_message)
             client_type = init_data.get("type")
@@ -88,21 +87,16 @@ class WebSocketRemoteServer:
                     data = json.loads(message)
                     await self.route_message(data, websocket, client_type)
                     
-                except websockets.exceptions.ConnectionClosed:
-                    break
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"❌ Ошибка декодирования JSON от {client_type}: {e}")
-                    continue
                 except Exception as e:
-                    self.logger.error(f"❌ Ошибка обработки сообщения от {client_type}: {e}")
+                    self.logger.error(f"❌ Ошибка обработки сообщения: {e}")
                     continue
 
         except asyncio.TimeoutError:
             self.logger.warning(f"⏰ Таймаут инициализации клиента {client_ip}")
-        except websockets.exceptions.ConnectionClosed as e:
-            self.logger.info(f"🔌 Клиент {client_type} отключился: {e}")
+        except websockets.exceptions.ConnectionClosed:
+            self.logger.info(f"🔌 Клиент {client_type} отключился")
         except Exception as e:
-            self.logger.error(f"❌ Неожиданная ошибка с клиентом {client_type}: {e}")
+            self.logger.error(f"❌ Неожиданная ошибка: {e}")
         finally:
             # Очистка при отключении
             if client_type == "controller" and websocket == self.controller_client:
@@ -138,22 +132,19 @@ class WebSocketRemoteServer:
             if self.controller_client:
                 await self.controller_client.send(json.dumps({
                     "type": "screen_update",
-                    "screen_data": data.get("screen_data"),
-                    "timestamp": datetime.now().isoformat()
+                    "screen_data": data.get("screen_data")
                 }))
                 
         elif sender_type == "controlled" and message_type == "status_update":
             if self.controller_client:
                 await self.controller_client.send(json.dumps({
                     "type": "controlled_status",
-                    "status": data.get("status"),
                     "info": data.get("info")
                 }))
 
     async def start_server(self):
         """Запуск WebSocket сервера"""
-        self.logger.info(f"🚀 Запуск сервера удаленного доступа")
-        self.logger.info(f"📍 Хост: {self.host}, Порт: {self.port}")
+        self.logger.info(f"🚀 Запуск сервера на {self.host}:{self.port}")
 
         start_server = websockets.serve(
             self.handle_client, 
@@ -161,12 +152,11 @@ class WebSocketRemoteServer:
             self.port,
             ping_interval=30,
             ping_timeout=10,
-            close_timeout=5,
-            max_size=10 * 1024 * 1024  # 10MB
+            max_size=5 * 1024 * 1024
         )
         
         async with start_server:
-            self.logger.info("✅ Сервер удаленного доступа успешно запущен")
+            self.logger.info("✅ Сервер успешно запущен")
             await asyncio.Future()
 
 if __name__ == "__main__":
@@ -174,6 +164,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(server.start_server())
     except KeyboardInterrupt:
-        print("\n🛑 Сервер остановлен пользователем")
+        print("\n🛑 Сервер остановлен")
     except Exception as e:
-        print(f"❌ Критическая ошибка сервера: {e}")
+        print(f"❌ Ошибка сервера: {e}")

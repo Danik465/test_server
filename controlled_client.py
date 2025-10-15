@@ -5,8 +5,7 @@ import sys
 import logging
 import base64
 import io
-import zlib
-from PIL import ImageGrab, ImageChops, Image
+from PIL import ImageGrab
 import pyautogui
 from datetime import datetime
 import time
@@ -19,8 +18,6 @@ class RemoteControlledClient:
         self.screen_capturing = False
         self.mouse_control = False
         self.screen_task = None
-        self.last_screenshot = None
-        self.command_queue = asyncio.Queue()
         self.setup_logging()
         
     def setup_logging(self):
@@ -34,85 +31,44 @@ class RemoteControlledClient:
         )
         self.logger = logging.getLogger("RemoteControlled")
 
-    def capture_optimized_screen(self):
-        """Оптимизированный захват экрана с дифференциальным сжатием"""
+    def capture_screen(self):
+        """Простой захват экрана без сложного сжатия"""
         try:
             # Захватываем скриншот
             screenshot = ImageGrab.grab()
             
             # Уменьшаем размер для производительности
-            screenshot.thumbnail((1024, 768), Image.Resampling.LANCZOS)
+            screenshot.thumbnail((800, 600), Image.Resampling.LANCZOS)
             
-            # Применяем дифференциальное сжатие
-            if self.last_screenshot:
-                # Сравниваем с предыдущим кадром
-                diff = ImageChops.difference(screenshot, self.last_screenshot)
-                
-                # Если изменения минимальны, отправляем только разницу
-                bbox = diff.getbbox()
-                if bbox and (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) < 50000:  # Порог изменений
-                    # Вырезаем измененную область
-                    region = screenshot.crop(bbox)
-                    buffer = io.BytesIO()
-                    region.save(buffer, format='JPEG', quality=40, optimize=True)
-                    compressed_data = buffer.getvalue()
-                    
-                    result = {
-                        'type': 'diff',
-                        'data': base64.b64encode(compressed_data).decode('utf-8'),
-                        'bbox': bbox,
-                        'full_size': screenshot.size
-                    }
-                    self.last_screenshot = screenshot.copy()
-                    return result
-            
-            # Если изменений много или это первый кадр - отправляем полное изображение
+            # Конвертируем в base64
             buffer = io.BytesIO()
-            screenshot.save(buffer, format='JPEG', quality=40, optimize=True)
-            compressed_data = zlib.compress(buffer.getvalue())  # Дополнительное сжатие
+            screenshot.save(buffer, format='JPEG', quality=60, optimize=True)
+            image_data = buffer.getvalue()
             
-            result = {
-                'type': 'full',
-                'data': base64.b64encode(compressed_data).decode('utf-8'),
-                'size': screenshot.size
-            }
-            self.last_screenshot = screenshot.copy()
-            return result
+            return base64.b64encode(image_data).decode('utf-8')
             
         except Exception as e:
             self.logger.error(f"Ошибка захвата экрана: {e}")
             return None
 
     async def send_screen_updates(self):
-        """Периодическая отправка обновлений экрана с ограничением FPS"""
-        frame_count = 0
-        last_time = time.time()
-        
+        """Отправка обновлений экрана с балансом качества/производительности"""
         while self.screen_capturing and self.connected:
             try:
                 start_time = time.time()
                 
-                screen_data = self.capture_optimized_screen()
+                screen_data = self.capture_screen()
                 if screen_data and self.websocket:
                     await self.websocket.send(json.dumps({
                         "type": "screen_data",
                         "screen_data": screen_data,
-                        "frame_id": frame_count,
                         "timestamp": start_time
                     }))
-                    frame_count += 1
                 
-                # Ограничиваем FPS до 5 кадров в секунду
+                # Баланс FPS - 8 кадров в секунду
                 elapsed = time.time() - start_time
-                sleep_time = max(0.2 - elapsed, 0)  # 5 FPS
+                sleep_time = max(0.125 - elapsed, 0.01)  # 8 FPS
                 await asyncio.sleep(sleep_time)
-                
-                # Логируем FPS каждые 5 секунд
-                if time.time() - last_time > 5:
-                    current_fps = frame_count / (time.time() - last_time)
-                    self.logger.debug(f"Текущий FPS: {current_fps:.1f}")
-                    frame_count = 0
-                    last_time = time.time()
                     
             except asyncio.CancelledError:
                 break
@@ -121,23 +77,7 @@ class RemoteControlledClient:
                 break
             except Exception as e:
                 self.logger.error(f"Ошибка отправки экрана: {e}")
-                await asyncio.sleep(1)  # Пауза при ошибках
-
-    async def command_processor(self):
-        """Обработчик команд с приоритетами"""
-        while self.connected:
-            try:
-                # Берем команду из очереди с таймаутом
-                command_data = await asyncio.wait_for(self.command_queue.get(), timeout=1.0)
-                command, data = command_data
-                
-                await self.execute_command(command, data)
-                self.command_queue.task_done()
-                
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                self.logger.error(f"Ошибка в обработчике команд: {e}")
+                await asyncio.sleep(0.5)
 
     async def execute_command(self, command, data=None):
         """Выполнение команд от управляющего клиента"""
@@ -165,69 +105,70 @@ class RemoteControlledClient:
                 await self.send_status(f"Управление мышью {status}")
                 
             elif command == "mouse_move" and self.mouse_control:
-                # Получаем текущее разрешение экрана
+                # Быстрое перемещение мыши без плавности
                 screen_width, screen_height = pyautogui.size()
-                
-                # Масштабируем координаты
-                scale_x = screen_width / 1024  # Соответствует размеру скриншота
-                scale_y = screen_height / 768
+                scale_x = screen_width / 800  # Соответствует размеру скриншота
+                scale_y = screen_height / 600
                 
                 x = int(data['x'] * scale_x)
                 y = int(data['y'] * scale_y)
                 
-                pyautogui.moveTo(x, y, duration=0.05)  # Плавное движение
+                pyautogui.moveTo(x, y, _pause=False)
                 
             elif command == "mouse_click" and self.mouse_control:
                 screen_width, screen_height = pyautogui.size()
-                scale_x = screen_width / 1024
-                scale_y = screen_height / 768
+                scale_x = screen_width / 800
+                scale_y = screen_height / 600
                 
                 x = int(data['x'] * scale_x)
                 y = int(data['y'] * scale_y)
                 button = data.get('button', 'left')
                 
-                pyautogui.click(x, y, button=button)
+                pyautogui.click(x, y, button=button, _pause=False)
                 
             elif command == "mouse_down" and self.mouse_control:
                 screen_width, screen_height = pyautogui.size()
-                scale_x = screen_width / 1024
-                scale_y = screen_height / 768
+                scale_x = screen_width / 800
+                scale_y = screen_height / 600
                 
                 x = int(data['x'] * scale_x)
                 y = int(data['y'] * scale_y)
                 button = data.get('button', 'left')
                 
-                pyautogui.mouseDown(x, y, button=button)
+                pyautogui.mouseDown(x, y, button=button, _pause=False)
                 
             elif command == "mouse_up" and self.mouse_control:
                 screen_width, screen_height = pyautogui.size()
-                scale_x = screen_width / 1024
-                scale_y = screen_height / 768
+                scale_x = screen_width / 800
+                scale_y = screen_height / 600
                 
                 x = int(data['x'] * scale_x)
                 y = int(data['y'] * scale_y)
                 button = data.get('button', 'left')
                 
-                pyautogui.mouseUp(x, y, button=button)
+                pyautogui.mouseUp(x, y, button=button, _pause=False)
                 
             elif command == "key_press" and self.mouse_control:
                 key = data['key']
-                pyautogui.press(key)
+                pyautogui.press(key, _pause=False)
                 
             elif command == "key_down" and self.mouse_control:
                 key = data['key']
-                pyautogui.keyDown(key)
+                pyautogui.keyDown(key, _pause=False)
                 
             elif command == "key_up" and self.mouse_control:
                 key = data['key']
-                pyautogui.keyUp(key)
+                pyautogui.keyUp(key, _pause=False)
                 
             elif command == "type_write" and self.mouse_control:
                 text = data['text']
-                pyautogui.write(text, interval=0.05)  # Замедленный ввод
+                pyautogui.write(text, interval=0.01, _pause=False)
                 
             else:
-                await self.send_status(f"Команда {command} получена")
+                if self.mouse_control:
+                    await self.send_status(f"Получена команда: {command}")
+                else:
+                    await self.send_status(f"Команда {command} игнорируется (управление отключено)")
                 
         except Exception as e:
             self.logger.error(f"Ошибка выполнения команды {command}: {e}")
@@ -256,7 +197,7 @@ class RemoteControlledClient:
                     ping_interval=30,
                     ping_timeout=10,
                     close_timeout=5,
-                    max_size=10 * 1024 * 1024  # 10MB limit
+                    max_size=5 * 1024 * 1024  # 5MB limit
                 )
                 
                 # Отправляем идентификатор
@@ -278,7 +219,7 @@ class RemoteControlledClient:
             except Exception as e:
                 self.logger.error(f"❌ Ошибка подключения (попытка {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    await asyncio.sleep(2 ** attempt)
                     
         return False
 
@@ -289,8 +230,8 @@ class RemoteControlledClient:
                 data = json.loads(message)
                 
                 if data["type"] == "execute_command":
-                    # Добавляем команду в очередь для обработки
-                    await self.command_queue.put((data["command"], data.get("data")))
+                    # Немедленное выполнение команды (без очереди)
+                    await self.execute_command(data["command"], data.get("data"))
                     
                 elif data["type"] == "error":
                     self.logger.error(f"Ошибка от сервера: {data.get('message', '')}")
@@ -313,9 +254,6 @@ class RemoteControlledClient:
         print("⚠️  ВНИМАНИЕ: После активации управления ваш компьютер будет управляться удаленно!")
         print("-" * 50)
         
-        # Запускаем обработчик команд
-        command_handler = asyncio.create_task(self.command_processor())
-        
         try:
             await self.receive_commands()
         except Exception as e:
@@ -326,7 +264,6 @@ class RemoteControlledClient:
             self.screen_capturing = False
             self.mouse_control = False
             
-            command_handler.cancel()
             if self.screen_task:
                 self.screen_task.cancel()
                 

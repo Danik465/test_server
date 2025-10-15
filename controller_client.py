@@ -10,7 +10,7 @@ import io
 from datetime import datetime
 import threading
 import queue
-import zlib
+import time
 
 class RemoteControllerClient:
     def __init__(self):
@@ -22,8 +22,8 @@ class RemoteControllerClient:
         self.asyncio_thread = None
         self.message_queue = queue.Queue()
         self.mouse_control_enabled = False
-        self.last_image = None
-        self.command_queue = asyncio.Queue()
+        self.last_mouse_time = 0
+        self.mouse_throttle = 0.033  # 30 FPS для мыши
         self.setup_logging()
         
     def setup_logging(self):
@@ -50,9 +50,6 @@ class RemoteControllerClient:
         
         self.status_label = tk.Label(status_frame, text="Статус: Отключен", fg="red", font=("Arial", 12))
         self.status_label.pack(side=tk.LEFT, padx=10)
-        
-        self.performance_label = tk.Label(status_frame, text="FPS: 0", fg="blue", font=("Arial", 10))
-        self.performance_label.pack(side=tk.RIGHT, padx=10)
         
         # Информация
         info_frame = tk.Frame(self.control_window)
@@ -92,19 +89,12 @@ class RemoteControllerClient:
         # Окно для отображения экрана
         self.screen_window = tk.Toplevel(self.control_window)
         self.screen_window.title("Экран удаленного компьютера")
-        self.screen_window.geometry("1024x768")
+        self.screen_window.geometry("800x600")
         
-        # Холст для отображения с прокруткой
-        self.canvas = tk.Canvas(self.screen_window, bg="white")
-        scroll_x = tk.Scrollbar(self.screen_window, orient=tk.HORIZONTAL, command=self.canvas.xview)
-        scroll_y = tk.Scrollbar(self.screen_window, orient=tk.VERTICAL, command=self.canvas.yview)
-        self.canvas.configure(xscrollcommand=scroll_x.set, yscrollcommand=scroll_y.set)
+        # Простой Label для отображения изображения
+        self.screen_label = tk.Label(self.screen_window, bg="black")
+        self.screen_label.pack(fill=tk.BOTH, expand=True)
         
-        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        self.screen_image = None
         self.screen_window.protocol("WM_DELETE_WINDOW", lambda: self.screen_window.withdraw())
         self.screen_window.withdraw()
 
@@ -113,51 +103,38 @@ class RemoteControllerClient:
 
         # Запускаем обработку сообщений из очереди
         self.process_messages()
-        
-        # Счетчик FPS
-        self.frame_count = 0
-        self.last_fps_time = time.time()
 
     def bind_control_events(self):
         """Привязка событий мыши и клавиатуры"""
         if not self.screen_window:
             return
             
-        # События мыши на холсте
-        self.canvas.bind("<Motion>", self.on_mouse_move)
-        self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
-        self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
-        self.canvas.bind("<ButtonPress-3>", self.on_right_mouse_down)
-        self.canvas.bind("<ButtonRelease-3>", self.on_right_mouse_up)
-        self.canvas.bind("<Double-Button-1>", self.on_double_click)
-        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)  # Колесико мыши
+        # События мыши
+        self.screen_label.bind("<Motion>", self.on_mouse_move)
+        self.screen_label.bind("<ButtonPress-1>", self.on_mouse_down)
+        self.screen_label.bind("<ButtonRelease-1>", self.on_mouse_up)
+        self.screen_label.bind("<ButtonPress-3>", self.on_right_mouse_down)
+        self.screen_label.bind("<ButtonRelease-3>", self.on_right_mouse_up)
+        self.screen_label.bind("<Double-Button-1>", self.on_double_click)
         
         # События клавиатуры
         self.screen_window.bind("<KeyPress>", self.on_key_press)
         self.screen_window.bind("<KeyRelease>", self.on_key_release)
         
         # Фокус для получения событий клавиатуры
-        self.canvas.focus_set()
-
-    def update_performance_info(self):
-        """Обновление информации о производительности"""
-        current_time = time.time()
-        if current_time - self.last_fps_time >= 1.0:  # Обновляем раз в секунду
-            fps = self.frame_count / (current_time - self.last_fps_time)
-            self.performance_label.config(text=f"FPS: {fps:.1f}")
-            self.frame_count = 0
-            self.last_fps_time = current_time
-            
-        # Планируем следующее обновление
-        if self.control_window:
-            self.control_window.after(1000, self.update_performance_info)
+        self.screen_label.focus_set()
 
     def on_mouse_move(self, event):
-        """Обработка движения мыши"""
-        if self.mouse_control_enabled and self.connected:
-            # Получаем координаты с учетом прокрутки
-            x = self.canvas.canvasx(event.x)
-            y = self.canvas.canvasy(event.y)
+        """Обработка движения мыши с троттлингом"""
+        current_time = time.time()
+        if (self.mouse_control_enabled and self.connected and 
+            (current_time - self.last_mouse_time) >= self.mouse_throttle):
+            
+            self.last_mouse_time = current_time
+            
+            # Ограничиваем координаты размерами окна
+            x = max(0, min(event.x, 799))
+            y = max(0, min(event.y, 599))
             
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_move", {"x": x, "y": y}), 
@@ -167,8 +144,8 @@ class RemoteControllerClient:
     def on_mouse_down(self, event):
         """Левый клик мыши - нажатие"""
         if self.mouse_control_enabled and self.connected:
-            x = self.canvas.canvasx(event.x)
-            y = self.canvas.canvasy(event.y)
+            x = max(0, min(event.x, 799))
+            y = max(0, min(event.y, 599))
             
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_down", {"x": x, "y": y, "button": "left"}), 
@@ -178,8 +155,8 @@ class RemoteControllerClient:
     def on_mouse_up(self, event):
         """Левый клик мыши - отпускание"""
         if self.mouse_control_enabled and self.connected:
-            x = self.canvas.canvasx(event.x)
-            y = self.canvas.canvasy(event.y)
+            x = max(0, min(event.x, 799))
+            y = max(0, min(event.y, 599))
             
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_up", {"x": x, "y": y, "button": "left"}), 
@@ -189,8 +166,8 @@ class RemoteControllerClient:
     def on_right_mouse_down(self, event):
         """Правый клик мыши - нажатие"""
         if self.mouse_control_enabled and self.connected:
-            x = self.canvas.canvasx(event.x)
-            y = self.canvas.canvasy(event.y)
+            x = max(0, min(event.x, 799))
+            y = max(0, min(event.y, 599))
             
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_down", {"x": x, "y": y, "button": "right"}), 
@@ -200,8 +177,8 @@ class RemoteControllerClient:
     def on_right_mouse_up(self, event):
         """Правый клик мыши - отпускание"""
         if self.mouse_control_enabled and self.connected:
-            x = self.canvas.canvasx(event.x)
-            y = self.canvas.canvasy(event.y)
+            x = max(0, min(event.x, 799))
+            y = max(0, min(event.y, 599))
             
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_up", {"x": x, "y": y, "button": "right"}), 
@@ -211,29 +188,13 @@ class RemoteControllerClient:
     def on_double_click(self, event):
         """Двойной клик"""
         if self.mouse_control_enabled and self.connected:
-            x = self.canvas.canvasx(event.x)
-            y = self.canvas.canvasy(event.y)
+            x = max(0, min(event.x, 799))
+            y = max(0, min(event.y, 599))
             
-            # Отправляем два быстрых клика
             asyncio.run_coroutine_threadsafe(
                 self.send_command("mouse_click", {"x": x, "y": y, "button": "left"}), 
                 self.asyncio_loop
             )
-
-    def on_mouse_wheel(self, event):
-        """Колесико мыши"""
-        if self.mouse_control_enabled and self.connected:
-            # Прокрутка колесика
-            if event.delta > 0:
-                asyncio.run_coroutine_threadsafe(
-                    self.send_command("key_press", {"key": "up"}), 
-                    self.asyncio_loop
-                )
-            else:
-                asyncio.run_coroutine_threadsafe(
-                    self.send_command("key_press", {"key": "down"}), 
-                    self.asyncio_loop
-                )
 
     def on_key_press(self, event):
         """Нажатие клавиши"""
@@ -261,7 +222,6 @@ class RemoteControllerClient:
 
     def on_key_release(self, event):
         """Отпускание клавиши"""
-        # Можно добавить обработку при необходимости
         pass
 
     def process_messages(self):
@@ -274,15 +234,14 @@ class RemoteControllerClient:
             pass
         finally:
             if self.control_window:
-                self.control_window.after(50, self.process_messages)  # 20 FPS для UI
+                self.control_window.after(50, self.process_messages)
 
     def handle_async_message(self, message):
         """Обработка сообщений из асинхронного потока"""
         msg_type = message.get("type")
         
         if msg_type == "screen_data":
-            self.frame_count += 1
-            self.display_optimized_screen(message["screen_data"])
+            self.display_screen(message["screen_data"])
             
         elif msg_type == "controlled_connected":
             self.log_info("🖥️ Управляемый клиент подключен")
@@ -301,43 +260,19 @@ class RemoteControllerClient:
         elif msg_type == "error":
             self.log_info(f"❌ Ошибка: {message.get('message', '')}")
 
-    def display_optimized_screen(self, screen_data):
-        """Отображение оптимизированного скриншота"""
+    def display_screen(self, screen_data):
+        """Отображение скриншота - упрощенная версия"""
         try:
-            if screen_data['type'] == 'full':
-                # Декомпрессия данных
-                compressed_data = base64.b64decode(screen_data['data'])
-                image_data = zlib.decompress(compressed_data)
-                image = Image.open(io.BytesIO(image_data))
-            else:
-                # Дифференциальное обновление
-                diff_data = base64.b64decode(screen_data['data'])
-                image = Image.open(io.BytesIO(diff_data))
-                
-                if self.last_image:
-                    # Применяем разницу к предыдущему изображению
-                    bbox = screen_data['bbox']
-                    self.last_image.paste(image, bbox)
-                    image = self.last_image
-                else:
-                    # Если нет предыдущего изображения, создаем черный фон
-                    size = screen_data['full_size']
-                    image = Image.new('RGB', size, 'black')
-                    image.paste(image, bbox)
-            
-            # Сохраняем для следующего обновления
-            self.last_image = image.copy()
+            # Декодируем base64 изображение
+            image_data = base64.b64decode(screen_data)
+            image = Image.open(io.BytesIO(image_data))
             
             # Конвертируем для Tkinter
             photo = ImageTk.PhotoImage(image)
             
-            # Обновляем холст
-            self.canvas.delete("all")
-            self.canvas.create_image(0, 0, anchor=tk.NW, image=photo)
-            self.canvas.image = photo  # Сохраняем ссылку
-            
-            # Обновляем область прокрутки
-            self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
+            # Обновляем изображение
+            self.screen_label.config(image=photo)
+            self.screen_label.image = photo  # Сохраняем ссылку
             
             if not self.screen_window.winfo_viewable():
                 self.screen_window.deiconify()
@@ -398,7 +333,7 @@ class RemoteControllerClient:
         self.mouse_btn.config(text="🐭 Выключить управление", bg="red", fg="white")
         self.log_info("🎮 Управление мышью АКТИВИРОВАНО")
         self.screen_window.deiconify()
-        self.canvas.focus_set()
+        self.screen_label.focus_set()
         
         asyncio.run_coroutine_threadsafe(
             self.send_command("toggle_mouse_control"), 
@@ -436,7 +371,7 @@ class RemoteControllerClient:
                 ping_interval=30,
                 ping_timeout=10,
                 close_timeout=5,
-                max_size=10 * 1024 * 1024
+                max_size=5 * 1024 * 1024
             )
             
             await self.websocket.send(json.dumps({
@@ -507,9 +442,6 @@ class RemoteControllerClient:
         self.create_control_window()
         self.start_async_thread(uri)
         
-        # Запускаем обновление производительности
-        self.update_performance_info()
-        
         # Запускаем главный цикл Tkinter
         try:
             self.control_window.mainloop()
@@ -563,5 +495,4 @@ def main():
         print(f"❌ Критическая ошибка: {e}")
 
 if __name__ == "__main__":
-    import time  # Добавляем импорт для time
     main()
