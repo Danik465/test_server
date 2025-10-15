@@ -23,7 +23,7 @@ class RemoteControllerClient:
         self.message_queue = queue.Queue()
         self.mouse_control_enabled = False
         self.last_mouse_time = 0
-        self.mouse_throttle = 0.033  # 30 FPS для мыши
+        self.mouse_throttle = 0.033
         self.setup_logging()
         
     def setup_logging(self):
@@ -91,21 +91,16 @@ class RemoteControllerClient:
         self.screen_window.title("Экран удаленного компьютера")
         self.screen_window.geometry("800x600")
         
-        # Создаем фрейм для правильного размещения
         screen_frame = tk.Frame(self.screen_window)
         screen_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Label для отображения изображения с черным фоном
         self.screen_label = tk.Label(screen_frame, bg="black")
         self.screen_label.pack(fill=tk.BOTH, expand=True)
         
         self.screen_window.protocol("WM_DELETE_WINDOW", lambda: self.screen_window.withdraw())
         self.screen_window.withdraw()
 
-        # Привязываем события мыши и клавиатуры
         self.bind_control_events()
-
-        # Запускаем обработку сообщений из очереди
         self.process_messages()
 
     def bind_control_events(self):
@@ -125,7 +120,6 @@ class RemoteControllerClient:
         self.screen_window.bind("<KeyPress>", self.on_key_press)
         self.screen_window.bind("<KeyRelease>", self.on_key_release)
         
-        # Фокус для получения событий клавиатуры
         self.screen_label.focus_set()
 
     def on_mouse_move(self, event):
@@ -135,8 +129,6 @@ class RemoteControllerClient:
             (current_time - self.last_mouse_time) >= self.mouse_throttle):
             
             self.last_mouse_time = current_time
-            
-            # Ограничиваем координаты размерами окна
             x = max(0, min(event.x, 799))
             y = max(0, min(event.y, 599))
             
@@ -204,7 +196,6 @@ class RemoteControllerClient:
         """Нажатие клавиши"""
         if self.mouse_control_enabled and self.connected:
             key = event.keysym
-            # Фильтруем специальные клавиши
             special_keys = {
                 "Return": "enter", "space": "space", "BackSpace": "backspace",
                 "Escape": "esc", "Tab": "tab", "Delete": "delete",
@@ -241,10 +232,11 @@ class RemoteControllerClient:
                 self.control_window.after(50, self.process_messages)
 
     def handle_async_message(self, message):
-        """Обработка сообщений из асинхронного потока"""
+        """Обработка сообщений из асинхронного потока - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         msg_type = message.get("type")
         
-        if msg_type == "screen_data":
+        # ИСПРАВЛЕНИЕ: Обрабатываем screen_update вместо screen_data
+        if msg_type == "screen_update":
             self.log_info("📸 Получены данные экрана")
             self.display_screen(message["screen_data"])
             
@@ -266,38 +258,70 @@ class RemoteControllerClient:
             self.log_info(f"❌ Ошибка: {message.get('message', '')}")
 
     def display_screen(self, screen_data):
-        """Отображение скриншота - исправленная версия"""
+        """Отображение скриншота - УЛУЧШЕННАЯ ВЕРСИЯ"""
         try:
-            # Проверяем, что данные не пустые
             if not screen_data:
-                self.logger.error("Пустые данные экрана")
+                self.logger.error("❌ Пустые данные экрана")
                 return
                 
-            # Декодируем base64 изображение
-            self.logger.info(f"Декодирование изображения, размер данных: {len(screen_data)}")
+            self.logger.info(f"🖼️ Декодирование изображения, размер данных: {len(screen_data)}")
+            
+            # Декодируем base64
             image_data = base64.b64decode(screen_data)
             
-            # Открываем изображение
-            image = Image.open(io.BytesIO(image_data))
+            # Создаем BytesIO объект
+            image_buffer = io.BytesIO(image_data)
             
-            # Конвертируем для Tkinter
-            photo = ImageTk.PhotoImage(image)
-            
-            # Обновляем изображение
-            self.screen_label.config(image=photo)
-            self.screen_label.image = photo  # Сохраняем ссылку, чтобы избежать сборки мусора
-            
-            # Показываем окно, если оно скрыто
-            if not self.screen_window.winfo_viewable():
-                self.screen_window.deiconify()
+            # Открываем изображение с обработкой ошибок
+            try:
+                image = Image.open(image_buffer)
                 
-            self.logger.info("✅ Изображение успешно отображено")
+                # Конвертируем в формат, совместимый с Tkinter
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                
+                # Создаем PhotoImage
+                photo = ImageTk.PhotoImage(image)
+                
+                # Обновляем изображение в GUI потоке
+                self.screen_label.config(image=photo)
+                self.screen_label.image = photo  # Важно: сохраняем ссылку!
+                
+                # Показываем окно, если оно скрыто
+                if not self.screen_window.winfo_viewable():
+                    self.screen_window.deiconify()
+                    
+                self.logger.info(f"✅ Изображение успешно отображено. Размер: {image.size}")
+                
+            except Exception as img_error:
+                self.logger.error(f"❌ Ошибка обработки изображения: {img_error}")
+                # Пробуем альтернативный метод
+                self.try_alternative_image_decode(image_data)
                 
         except Exception as e:
-            self.logger.error(f"❌ Ошибка отображения экрана: {e}")
-            # Показываем подробности ошибки
+            self.logger.error(f"❌ Критическая ошибка отображения экрана: {e}")
             import traceback
-            self.logger.error(f"Подробности: {traceback.format_exc()}")
+            self.logger.error(f"🔍 Подробности: {traceback.format_exc()}")
+
+    def try_alternative_image_decode(self, image_data):
+        """Альтернативный метод декодирования изображения"""
+        try:
+            # Пробуем открыть как JPEG с обработкой ошибок
+            image = Image.open(io.BytesIO(image_data))
+            image.load()  # Принудительно загружаем данные
+            
+            # Конвертируем в RGB если нужно
+            if image.mode in ('RGBA', 'LA', 'P'):
+                image = image.convert('RGB')
+            
+            photo = ImageTk.PhotoImage(image)
+            self.screen_label.config(image=photo)
+            self.screen_label.image = photo
+            
+            self.logger.info("✅ Изображение отображено (альтернативный метод)")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Альтернативный метод также не сработал: {e}")
 
     def update_status(self, message, is_connected=False):
         """Обновление статуса подключения"""
@@ -306,7 +330,6 @@ class RemoteControllerClient:
         self.status_label.config(text=status_text, 
                                fg="green" if is_connected else "red")
         
-        # Обновляем состояние кнопок
         self.screen_btn.config(state=tk.NORMAL if is_connected else tk.DISABLED)
         self.stop_screen_btn.config(state=tk.NORMAL if is_connected else tk.DISABLED)
         self.mouse_btn.config(state=tk.NORMAL if is_connected else tk.DISABLED)
@@ -316,7 +339,8 @@ class RemoteControllerClient:
     def log_info(self, message):
         """Добавление информации в лог"""
         if hasattr(self, 'info_text') and self.info_text:
-            self.info_text.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            self.info_text.insert(tk.END, f"{timestamp} - {message}\n")
             self.info_text.see(tk.END)
 
     def request_screen(self):
@@ -336,7 +360,6 @@ class RemoteControllerClient:
                 self.asyncio_loop
             )
             self.log_info("⏹️ Остановка передачи экрана")
-            # Очищаем изображение
             self.screen_label.config(image='')
             self.screen_window.withdraw()
 
@@ -353,7 +376,6 @@ class RemoteControllerClient:
         self.mouse_control_enabled = True
         self.mouse_btn.config(text="🐭 Выключить управление", bg="red", fg="white")
         self.log_info("🎮 Управление мышью АКТИВИРОВАНО")
-        # Показываем окно экрана
         if not self.screen_window.winfo_viewable():
             self.screen_window.deiconify()
         self.screen_label.focus_set()
@@ -383,9 +405,9 @@ class RemoteControllerClient:
                     "command": command,
                     "data": data
                 }))
-                self.logger.debug(f"Команда отправлена: {command}")
+                self.logger.debug(f"✅ Команда отправлена: {command}")
             except Exception as e:
-                self.logger.error(f"Ошибка отправки команды: {e}")
+                self.logger.error(f"❌ Ошибка отправки команды: {e}")
 
     async def connect_to_server(self, uri):
         try:
@@ -395,7 +417,7 @@ class RemoteControllerClient:
                 ping_interval=30,
                 ping_timeout=10,
                 close_timeout=5,
-                max_size=5 * 1024 * 1024
+                max_size=10 * 1024 * 1024  # Увеличиваем лимит
             )
             
             await self.websocket.send(json.dumps({
@@ -466,11 +488,10 @@ class RemoteControllerClient:
         self.create_control_window()
         self.start_async_thread(uri)
         
-        # Запускаем главный цикл Tkinter
         try:
             self.control_window.mainloop()
         except Exception as e:
-            self.logger.error(f"Ошибка GUI: {e}")
+            self.logger.error(f"❌ Ошибка GUI: {e}")
         finally:
             self.quit_app()
 

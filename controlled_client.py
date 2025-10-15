@@ -32,7 +32,7 @@ class RemoteControlledClient:
         self.logger = logging.getLogger("RemoteControlled")
 
     def capture_screen(self):
-        """Простой захват экрана без сложного сжатия"""
+        """Улучшенный захват экрана"""
         try:
             # Захватываем скриншот
             screenshot = ImageGrab.grab()
@@ -40,19 +40,22 @@ class RemoteControlledClient:
             # Уменьшаем размер для производительности
             screenshot.thumbnail((800, 600), Image.Resampling.LANCZOS)
             
-            # Конвертируем в base64
+            # Конвертируем в base64 - используем PNG для лучшего качества
             buffer = io.BytesIO()
-            screenshot.save(buffer, format='JPEG', quality=60, optimize=True)
+            screenshot.save(buffer, format='PNG')  # PNG вместо JPEG
             image_data = buffer.getvalue()
             
+            self.logger.debug(f"📸 Скриншот захвачен, размер: {len(image_data)} байт")
             return base64.b64encode(image_data).decode('utf-8')
             
         except Exception as e:
-            self.logger.error(f"Ошибка захвата экрана: {e}")
+            self.logger.error(f"❌ Ошибка захвата экрана: {e}")
             return None
 
     async def send_screen_updates(self):
-        """Отправка обновлений экрана с балансом качества/производительности"""
+        """Отправка обновлений экрана"""
+        self.logger.info("🔄 Начало передачи экрана")
+        
         while self.screen_capturing and self.connected:
             try:
                 start_time = time.time()
@@ -64,24 +67,30 @@ class RemoteControlledClient:
                         "screen_data": screen_data,
                         "timestamp": start_time
                     }))
+                    self.logger.debug(f"✅ Кадр отправлен, размер: {len(screen_data)}")
+                elif not screen_data:
+                    self.logger.warning("⚠️ Не удалось захватить экран")
                 
-                # Баланс FPS - 8 кадров в секунду
+                # Баланс FPS - 5 кадров в секунду для стабильности
                 elapsed = time.time() - start_time
-                sleep_time = max(0.125 - elapsed, 0.01)  # 8 FPS
+                sleep_time = max(0.2 - elapsed, 0.01)  # 5 FPS
                 await asyncio.sleep(sleep_time)
                     
             except asyncio.CancelledError:
+                self.logger.info("🛑 Передача экрана прервана")
                 break
             except websockets.exceptions.ConnectionClosed:
-                self.logger.warning("Соединение закрыто во время отправки экрана")
+                self.logger.warning("🔌 Соединение закрыто во время отправки экрана")
                 break
             except Exception as e:
-                self.logger.error(f"Ошибка отправки экрана: {e}")
+                self.logger.error(f"❌ Ошибка отправки экрана: {e}")
                 await asyncio.sleep(0.5)
 
     async def execute_command(self, command, data=None):
         """Выполнение команд от управляющего клиента"""
         try:
+            self.logger.info(f"🔧 Выполнение команды: {command}")
+            
             if command == "capture_screen":
                 if not self.screen_capturing:
                     self.screen_capturing = True
@@ -105,9 +114,8 @@ class RemoteControlledClient:
                 await self.send_status(f"Управление мышью {status}")
                 
             elif command == "mouse_move" and self.mouse_control:
-                # Быстрое перемещение мыши без плавности
                 screen_width, screen_height = pyautogui.size()
-                scale_x = screen_width / 800  # Соответствует размеру скриншота
+                scale_x = screen_width / 800
                 scale_y = screen_height / 600
                 
                 x = int(data['x'] * scale_x)
@@ -171,7 +179,7 @@ class RemoteControlledClient:
                     await self.send_status(f"Команда {command} игнорируется (управление отключено)")
                 
         except Exception as e:
-            self.logger.error(f"Ошибка выполнения команды {command}: {e}")
+            self.logger.error(f"❌ Ошибка выполнения команды {command}: {e}")
             await self.send_status(f"Ошибка выполнения: {e}")
 
     async def send_status(self, status_message):
@@ -184,7 +192,7 @@ class RemoteControlledClient:
                     "info": status_message
                 }))
             except Exception as e:
-                self.logger.error(f"Ошибка отправки статуса: {e}")
+                self.logger.error(f"❌ Ошибка отправки статуса: {e}")
 
     async def connect_to_server(self, uri, max_retries=5):
         """Подключение к серверу с повторными попытками"""
@@ -197,7 +205,7 @@ class RemoteControlledClient:
                     ping_interval=30,
                     ping_timeout=10,
                     close_timeout=5,
-                    max_size=5 * 1024 * 1024  # 5MB limit
+                    max_size=10 * 1024 * 1024  # Увеличиваем лимит
                 )
                 
                 # Отправляем идентификатор
@@ -230,11 +238,10 @@ class RemoteControlledClient:
                 data = json.loads(message)
                 
                 if data["type"] == "execute_command":
-                    # Немедленное выполнение команды (без очереди)
                     await self.execute_command(data["command"], data.get("data"))
                     
                 elif data["type"] == "error":
-                    self.logger.error(f"Ошибка от сервера: {data.get('message', '')}")
+                    self.logger.error(f"❌ Ошибка от сервера: {data.get('message', '')}")
                     
         except websockets.exceptions.ConnectionClosed as e:
             self.logger.warning(f"🔌 Соединение с сервером закрыто: {e}")
@@ -246,7 +253,7 @@ class RemoteControlledClient:
     async def start(self, uri):
         """Основной цикл клиента"""
         if not await self.connect_to_server(uri):
-            self.logger.error("Не удалось подключиться к серверу")
+            self.logger.error("❌ Не удалось подключиться к серверу")
             return
             
         print(f"\n✅ Управляемый клиент {self.client_id} запущен")
@@ -257,7 +264,7 @@ class RemoteControlledClient:
         try:
             await self.receive_commands()
         except Exception as e:
-            self.logger.error(f"Ошибка в основном цикле: {e}")
+            self.logger.error(f"❌ Ошибка в основном цикле: {e}")
         finally:
             # Очистка ресурсов
             self.connected = False
