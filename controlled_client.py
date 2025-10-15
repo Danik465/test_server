@@ -5,7 +5,7 @@ import sys
 import logging
 import base64
 import io
-from PIL import ImageGrab
+from PIL import ImageGrab, Image
 import pyautogui
 from datetime import datetime
 import time

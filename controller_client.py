@@ -91,8 +91,12 @@ class RemoteControllerClient:
         self.screen_window.title("Экран удаленного компьютера")
         self.screen_window.geometry("800x600")
         
-        # Простой Label для отображения изображения
-        self.screen_label = tk.Label(self.screen_window, bg="black")
+        # Создаем фрейм для правильного размещения
+        screen_frame = tk.Frame(self.screen_window)
+        screen_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Label для отображения изображения с черным фоном
+        self.screen_label = tk.Label(screen_frame, bg="black")
         self.screen_label.pack(fill=tk.BOTH, expand=True)
         
         self.screen_window.protocol("WM_DELETE_WINDOW", lambda: self.screen_window.withdraw())
@@ -241,6 +245,7 @@ class RemoteControllerClient:
         msg_type = message.get("type")
         
         if msg_type == "screen_data":
+            self.log_info("📸 Получены данные экрана")
             self.display_screen(message["screen_data"])
             
         elif msg_type == "controlled_connected":
@@ -261,10 +266,18 @@ class RemoteControllerClient:
             self.log_info(f"❌ Ошибка: {message.get('message', '')}")
 
     def display_screen(self, screen_data):
-        """Отображение скриншота - упрощенная версия"""
+        """Отображение скриншота - исправленная версия"""
         try:
+            # Проверяем, что данные не пустые
+            if not screen_data:
+                self.logger.error("Пустые данные экрана")
+                return
+                
             # Декодируем base64 изображение
+            self.logger.info(f"Декодирование изображения, размер данных: {len(screen_data)}")
             image_data = base64.b64decode(screen_data)
+            
+            # Открываем изображение
             image = Image.open(io.BytesIO(image_data))
             
             # Конвертируем для Tkinter
@@ -272,13 +285,19 @@ class RemoteControllerClient:
             
             # Обновляем изображение
             self.screen_label.config(image=photo)
-            self.screen_label.image = photo  # Сохраняем ссылку
+            self.screen_label.image = photo  # Сохраняем ссылку, чтобы избежать сборки мусора
             
+            # Показываем окно, если оно скрыто
             if not self.screen_window.winfo_viewable():
                 self.screen_window.deiconify()
                 
+            self.logger.info("✅ Изображение успешно отображено")
+                
         except Exception as e:
-            self.logger.error(f"Ошибка отображения экрана: {e}")
+            self.logger.error(f"❌ Ошибка отображения экрана: {e}")
+            # Показываем подробности ошибки
+            import traceback
+            self.logger.error(f"Подробности: {traceback.format_exc()}")
 
     def update_status(self, message, is_connected=False):
         """Обновление статуса подключения"""
@@ -296,7 +315,7 @@ class RemoteControllerClient:
 
     def log_info(self, message):
         """Добавление информации в лог"""
-        if hasattr(self, 'info_text'):
+        if hasattr(self, 'info_text') and self.info_text:
             self.info_text.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
             self.info_text.see(tk.END)
 
@@ -307,7 +326,7 @@ class RemoteControllerClient:
                 self.send_command("capture_screen"), 
                 self.asyncio_loop
             )
-            self.log_info("Запрос скриншота отправлен")
+            self.log_info("📨 Запрос скриншота отправлен")
 
     def stop_screen(self):
         """Остановка передачи экрана"""
@@ -316,7 +335,9 @@ class RemoteControllerClient:
                 self.send_command("stop_capture"), 
                 self.asyncio_loop
             )
-            self.log_info("Остановка передачи экрана")
+            self.log_info("⏹️ Остановка передачи экрана")
+            # Очищаем изображение
+            self.screen_label.config(image='')
             self.screen_window.withdraw()
 
     def toggle_mouse_control(self):
@@ -332,7 +353,9 @@ class RemoteControllerClient:
         self.mouse_control_enabled = True
         self.mouse_btn.config(text="🐭 Выключить управление", bg="red", fg="white")
         self.log_info("🎮 Управление мышью АКТИВИРОВАНО")
-        self.screen_window.deiconify()
+        # Показываем окно экрана
+        if not self.screen_window.winfo_viewable():
+            self.screen_window.deiconify()
         self.screen_label.focus_set()
         
         asyncio.run_coroutine_threadsafe(
@@ -353,13 +376,14 @@ class RemoteControllerClient:
 
     async def send_command(self, command, data=None):
         """Отправка команды управляемому клиенту"""
-        if self.websocket:
+        if self.websocket and self.connected:
             try:
                 await self.websocket.send(json.dumps({
                     "type": "control_command",
                     "command": command,
                     "data": data
                 }))
+                self.logger.debug(f"Команда отправлена: {command}")
             except Exception as e:
                 self.logger.error(f"Ошибка отправки команды: {e}")
 
