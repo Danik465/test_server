@@ -7,6 +7,9 @@ import base64
 import tkinter as tk
 from PIL import Image, ImageTk
 import io
+from datetime import datetime
+import threading
+import queue
 
 class RemoteControllerClient:
     def __init__(self):
@@ -14,6 +17,9 @@ class RemoteControllerClient:
         self.client_id = f"controller_{datetime.now().strftime('%H%M%S')}"
         self.connected = False
         self.screen_window = None
+        self.control_window = None
+        self.asyncio_thread = None
+        self.message_queue = queue.Queue()
         self.setup_logging()
         
     def setup_logging(self):
@@ -32,6 +38,7 @@ class RemoteControllerClient:
         self.control_window = tk.Tk()
         self.control_window.title(f"Удаленное управление - {self.client_id}")
         self.control_window.geometry("400x300")
+        self.control_window.protocol("WM_DELETE_WINDOW", self.quit_app)
         
         # Статус
         self.status_label = tk.Label(self.control_window, text="Статус: Отключен", fg="red")
@@ -62,7 +69,48 @@ class RemoteControllerClient:
         self.screen_window.geometry("800x600")
         self.screen_label = tk.Label(self.screen_window)
         self.screen_label.pack(fill=tk.BOTH, expand=True)
-        self.screen_window.withdraw()  # Скрываем initially
+        self.screen_window.protocol("WM_DELETE_WINDOW", lambda: self.screen_window.withdraw())
+        self.screen_window.withdraw()
+
+        # Запускаем обработку сообщений из очереди
+        self.process_messages()
+
+    def process_messages(self):
+        """Обработка сообщений из очереди (вызывается периодически)"""
+        try:
+            while True:
+                message = self.message_queue.get_nowait()
+                self.handle_async_message(message)
+        except queue.Empty:
+            pass
+        finally:
+            # Планируем следующую проверку через 100мс
+            if self.control_window:
+                self.control_window.after(100, self.process_messages)
+
+    def handle_async_message(self, message):
+        """Обработка сообщений из асинхронного потока"""
+        msg_type = message.get("type")
+        
+        if msg_type == "screen_update":
+            self.log_info("📸 Получен обновленный экран")
+            self.display_screen(message["screen_data"])
+            
+        elif msg_type == "controlled_connected":
+            self.log_info("🖥️ Управляемый клиент подключен")
+            
+        elif msg_type == "controlled_disconnected":
+            self.log_info("🔌 Управляемый клиент отключен")
+            self.screen_window.withdraw()
+            
+        elif msg_type == "controlled_status":
+            self.log_info(f"📊 Статус управляемого: {message.get('info', '')}")
+            
+        elif msg_type == "connection_status":
+            self.update_status(message["message"], message["connected"])
+            
+        elif msg_type == "error":
+            self.log_info(f"❌ Ошибка: {message.get('message', '')}")
 
     def update_status(self, message, is_connected=False):
         """Обновление статуса подключения"""
@@ -78,8 +126,9 @@ class RemoteControllerClient:
 
     def log_info(self, message):
         """Добавление информации в лог"""
-        self.info_text.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
-        self.info_text.see(tk.END)
+        if hasattr(self, 'info_text'):
+            self.info_text.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
+            self.info_text.see(tk.END)
 
     def display_screen(self, screen_data):
         """Отображение полученного скриншота"""
@@ -101,26 +150,33 @@ class RemoteControllerClient:
         except Exception as e:
             self.logger.error(f"Ошибка отображения экрана: {e}")
 
-    async def request_screen(self):
+    def request_screen(self):
         """Запрос скриншота с управляемого клиента"""
-        if self.websocket and self.connected:
-            await self.websocket.send(json.dumps({
-                "type": "control_command",
-                "command": "capture_screen"
-            }))
+        if self.connected:
+            # Отправляем команду через очередь в asyncio поток
+            asyncio.run_coroutine_threadsafe(
+                self.send_command("capture_screen"), 
+                self.asyncio_loop
+            )
             self.log_info("Запрос скриншота отправлен")
 
     def toggle_mouse_control(self):
         """Включение/выключение управления мышью"""
-        asyncio.create_task(self._toggle_mouse_control())
-
-    async def _toggle_mouse_control(self):
-        if self.websocket and self.connected:
-            await self.websocket.send(json.dumps({
-                "type": "control_command", 
-                "command": "toggle_mouse_control"
-            }))
+        if self.connected:
+            asyncio.run_coroutine_threadsafe(
+                self.send_command("toggle_mouse_control"), 
+                self.asyncio_loop
+            )
             self.log_info("Команда управления мышью отправлена")
+
+    async def send_command(self, command, data=None):
+        """Отправка команды управляемому клиенту"""
+        if self.websocket:
+            await self.websocket.send(json.dumps({
+                "type": "control_command",
+                "command": command,
+                "data": data
+            }))
 
     async def connect_to_server(self, uri):
         try:
@@ -142,78 +198,86 @@ class RemoteControllerClient:
             data = json.loads(message)
             
             if data.get("type") == "connection_established":
-                self.update_status("✅ Подключение к серверу установлено", True)
+                self.message_queue.put({
+                    "type": "connection_status",
+                    "message": "✅ Подключение к серверу установлено",
+                    "connected": True
+                })
                 return True
                 
         except Exception as e:
             self.logger.error(f"❌ Ошибка подключения: {e}")
-            self.update_status(f"❌ Ошибка подключения: {e}", False)
+            self.message_queue.put({
+                "type": "connection_status",
+                "message": f"❌ Ошибка подключения: {e}",
+                "connected": False
+            })
             return False
 
     async def receive_messages(self):
         try:
             async for message in self.websocket:
                 data = json.loads(message)
-                
-                if data["type"] == "screen_update":
-                    self.log_info("📸 Получен обновленный экран")
-                    self.display_screen(data["screen_data"])
-                    
-                elif data["type"] == "controlled_connected":
-                    self.log_info("🖥️ Управляемый клиент подключен")
-                    
-                elif data["type"] == "controlled_disconnected":
-                    self.log_info("🔌 Управляемый клиент отключен")
-                    self.screen_window.withdraw()
-                    
-                elif data["type"] == "controlled_status":
-                    self.log_info(f"📊 Статус управляемого: {data.get('info', '')}")
-                    
-                elif data["type"] == "error":
-                    self.log_info(f"❌ Ошибка: {data.get('message', '')}")
+                # Помещаем сообщение в очередь для обработки в главном потоке
+                self.message_queue.put(data)
                     
         except websockets.exceptions.ConnectionClosed:
             self.logger.warning("🔌 Соединение с сервером закрыто")
-            self.update_status("🔌 Соединение с сервером потеряно", False)
+            self.message_queue.put({
+                "type": "connection_status",
+                "message": "🔌 Соединение с сервером потеряно",
+                "connected": False
+            })
         except Exception as e:
             self.logger.error(f"❌ Ошибка при получении сообщений: {e}")
-            self.update_status(f"❌ Ошибка: {e}", False)
+            self.message_queue.put({
+                "type": "connection_status", 
+                "message": f"❌ Ошибка: {e}",
+                "connected": False
+            })
 
-    async def start(self, uri):
-        self.create_control_window()
+    async def async_main(self, uri):
+        """Асинхронная основная функция"""
+        self.asyncio_loop = asyncio.get_running_loop()
         
         if not await self.connect_to_server(uri):
             return
             
-        # Запускаем получение сообщений в отдельной задаче
-        receive_task = asyncio.create_task(self.receive_messages())
+        await self.receive_messages()
+
+    def start_async_thread(self, uri):
+        """Запуск асинхронного кода в отдельном потоке"""
+        def run_async():
+            asyncio.run(self.async_main(uri))
         
-        # Запускаем Tkinter mainloop в отдельном потоке
-        def run_tk():
-            try:
-                self.control_window.mainloop()
-            except Exception as e:
-                self.logger.error(f"Ошибка GUI: {e}")
-            finally:
-                # При закрытии окна останавливаем asyncio
-                asyncio.get_event_loop().stop()
+        self.asyncio_thread = threading.Thread(target=run_async, daemon=True)
+        self.asyncio_thread.start()
+
+    def start(self, uri):
+        """Запуск приложения"""
+        self.create_control_window()
+        self.start_async_thread(uri)
         
-        tk_thread = asyncio.get_event_loop().run_in_executor(None, run_tk)
-        
+        # Запускаем главный цикл Tkinter
         try:
-            await asyncio.gather(receive_task, tk_thread)
+            self.control_window.mainloop()
         except Exception as e:
-            self.logger.error(f"Ошибка в основном цикле: {e}")
+            self.logger.error(f"Ошибка GUI: {e}")
         finally:
-            if self.websocket:
-                await self.websocket.close()
+            self.quit_app()
 
     def quit_app(self):
         """Выход из приложения"""
+        if self.websocket:
+            # Закрываем WebSocket соединение
+            asyncio.run_coroutine_threadsafe(
+                self.websocket.close(),
+                self.asyncio_loop
+            )
+        
         if self.control_window:
             self.control_window.quit()
-        if self.screen_window:
-            self.screen_window.quit()
+            self.control_window.destroy()
 
 def main():
     print("=== 🎮 Клиент удаленного управления ===")
@@ -236,7 +300,7 @@ def main():
             logger.info(f"🌐 Удаленное подключение: {uri}")
 
         client = RemoteControllerClient()
-        asyncio.run(client.start(uri))
+        client.start(uri)
         
     except KeyboardInterrupt:
         logger.info("🛑 Клиент остановлен пользователем")

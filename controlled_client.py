@@ -6,8 +6,6 @@ import logging
 import base64
 import io
 from PIL import ImageGrab
-import pyautogui
-import threading
 from datetime import datetime
 
 class RemoteControlledClient:
@@ -16,7 +14,6 @@ class RemoteControlledClient:
         self.client_id = f"controlled_{datetime.now().strftime('%H%M%S')}"
         self.connected = False
         self.screen_capturing = False
-        self.mouse_control = False
         self.setup_logging()
         
     def setup_logging(self):
@@ -35,7 +32,7 @@ class RemoteControlledClient:
         try:
             screenshot = ImageGrab.grab()
             buffer = io.BytesIO()
-            screenshot.save(buffer, format='JPEG', quality=50)  # Сжатие для скорости
+            screenshot.save(buffer, format='JPEG', quality=50)
             return base64.b64encode(buffer.getvalue()).decode('utf-8')
         except Exception as e:
             self.logger.error(f"Ошибка захвата экрана: {e}")
@@ -51,7 +48,7 @@ class RemoteControlledClient:
                         "type": "screen_data",
                         "screen_data": screen_data
                     }))
-                await asyncio.sleep(0.1)  # 10 FPS
+                await asyncio.sleep(0.5)  # 2 FPS для снижения нагрузки
             except Exception as e:
                 self.logger.error(f"Ошибка отправки экрана: {e}")
                 break
@@ -66,21 +63,11 @@ class RemoteControlledClient:
                     await self.send_status("Захват экрана активирован")
                     
             elif command == "toggle_mouse_control":
-                self.mouse_control = not self.mouse_control
-                status = "активировано" if self.mouse_control else "деактивировано"
-                await self.send_status(f"Управление мышью {status}")
-                
-            elif command == "mouse_move" and self.mouse_control:
-                pyautogui.moveTo(data['x'], data['y'])
-                
-            elif command == "mouse_click" and self.mouse_control:
-                pyautogui.click(data['x'], data['y'], button=data.get('button', 'left'))
-                
-            elif command == "key_press" and self.mouse_control:
-                pyautogui.press(data['key'])
+                # В этой версии просто подтверждаем команду
+                await self.send_status("Управление мышью переключено")
                 
             else:
-                await self.send_status(f"Неизвестная команда: {command}")
+                await self.send_status(f"Получена команда: {command}")
                 
         except Exception as e:
             self.logger.error(f"Ошибка выполнения команды {command}: {e}")
@@ -177,7 +164,7 @@ def main():
             domain = input("Введите домен сервера или 'local' для локального: ").strip()
 
         if domain.lower() == 'local':
-            uri = "ws://192.168.0.83:8080"
+            uri = "ws://127.0.0.1:8000"
             logger.info(f"🔧 Локальное подключение: {uri}")
         else:
             domain = domain.replace('http://', '').replace('https://', '').replace('ws://', '').replace('wss://', '')
